@@ -3,7 +3,7 @@
 > [!NOTE]
 > No longer under active development. [Read more here](https://ryangjchandler.co.uk/posts/saying-goodbye-to-pxp).
 
-A suite of high-performance tools for PHP developers. Written in Rust, designed for performance and reliability.
+An early-stage transpiler for modern PHP development. Written in Rust, designed for performance and reliability.
 
 ## Credits
 

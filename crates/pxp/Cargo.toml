@@ -1,0 +1,9 @@
+[package]
+name = "pxp"
+version = "0.0.1"
+edition = "2021"
+description = "A fast PHP superset transpiler."
+
+# Zero external dependencies for the pilot: everything below is std-only so the
+# build stays trivially fast and the surgical-splice core is easy to reason about.
+# rayon comes in when we parallelize `build` across files.

@@ -1,0 +1,28 @@
+<?php
+
+$factor = 3;
+$offset = 10;
+
+// Multi-line short closure that reads two outer variables.
+$scale = fn ($x) => {
+    $scaled = $x * $factor;
+    return $scaled + $offset;
+};
+
+// $y is assigned before use, so it is a local — not captured.
+$build = fn () => {
+    $y = 5;
+    return $y;
+};
+
+// foreach targets ($k, $v) are locals; only $rows is captured.
+$dump = fn () => {
+    foreach ($rows as $k => $v) {
+        echo "{$k}={$v}";
+    }
+};
+
+// Plain arrow functions are left completely untouched.
+$double = fn ($n) => $n * 2;
+
+echo $scale(4);

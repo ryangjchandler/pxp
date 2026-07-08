@@ -2,8 +2,7 @@
 //!
 //! For each block-bodied short closure (`fn (...) => { ... }`) this computes the
 //! variables it captures from the enclosing scope — the `use (...)` list needed
-//! to lower it to a real closure. Unlike the earlier token-level heuristic, this
-//! is scope-correct:
+//! to lower it to a real closure. The analysis is scope-correct:
 //!
 //! * **Nested closures don't leak.** A nested closure contributes only its
 //!   *external references* (what it itself captures) to the outer scope, never
@@ -275,7 +274,7 @@ impl Scope {
                     self.visit_expr(i, out);
                 }
             }
-            ExprKind::New { class, args } => {
+            ExprKind::New { class, args, .. } => {
                 self.visit_expr(class, out);
                 self.visit_args(args, out);
             }

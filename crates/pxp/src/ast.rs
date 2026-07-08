@@ -224,6 +224,9 @@ pub enum ExprKind {
     New {
         class: Box<Expr>,
         args: Vec<Arg>,
+        /// pxp generics turbofish `new Box::<User>()`. `None` for a plain `new`;
+        /// its span covers `::<...>` so erasure can delete it.
+        type_args: Option<TypeArgs>,
     },
     /// `new class (...) extends X implements Y { ... }`.
     NewAnon {
@@ -415,6 +418,30 @@ pub enum TypeKind {
     Union(Vec<Type>),
     /// `A&B`
     Intersection(Vec<Type>),
+    /// pxp generics: a generic application `Foo<A, B>`. `name`/`name_span` are the
+    /// base type (kept natively on erasure); `args_span` covers `<...>` incl. the
+    /// angle brackets (deleted on erasure). The outer [`Type::span`] covers both.
+    Generic {
+        name: ByteString,
+        name_span: Span,
+        args: Vec<Type>,
+        args_span: Span,
+    },
+}
+
+/// pxp generics: an argument list `<A, B>` supplied at a use site (the `new`
+/// turbofish). `span` covers the whole clause incl. the leading `::` and brackets.
+#[derive(Clone, Debug)]
+pub struct TypeArgs {
+    pub span: Span,
+    pub args: Vec<Type>,
+}
+
+/// pxp generics: a declared type parameter in `class Box<T>`.
+#[derive(Clone, Debug)]
+pub struct TypeParam {
+    pub span: Span,
+    pub name: ByteString,
 }
 
 #[derive(Clone, Debug)]
@@ -450,6 +477,9 @@ pub enum Modifier {
 #[derive(Clone, Debug)]
 pub struct FunctionDecl {
     pub span: Span,
+    /// The attached `/** ... */` doc comment, if the declaration has one. Used for
+    /// free functions; a method's doc lives on its [`Member`].
+    pub doc: Option<Span>,
     pub attrs: Vec<AttributeGroup>,
     pub by_ref: bool,
     pub name: ByteString,
@@ -470,11 +500,18 @@ pub enum ClassKind {
 #[derive(Clone, Debug)]
 pub struct ClassLike {
     pub span: Span,
+    /// The attached `/** ... */` doc comment, if any (`None` for anonymous classes).
+    pub doc: Option<Span>,
     pub attrs: Vec<AttributeGroup>,
     pub modifiers: Vec<Modifier>,
     pub kind: ClassKind,
     /// `None` for an anonymous class.
     pub name: Option<ByteString>,
+    /// pxp generics: declared type parameters `<T, U>` (empty for a plain class).
+    pub type_params: Vec<TypeParam>,
+    /// Span of the whole `<...>` clause (incl. angle brackets), for erasure.
+    /// `None` when there are no type parameters.
+    pub type_params_span: Option<Span>,
     /// Backing type for `enum E: string`.
     pub enum_backing: Option<Type>,
     pub extends: Vec<ByteString>,
@@ -485,6 +522,9 @@ pub struct ClassLike {
 #[derive(Clone, Debug)]
 pub struct Member {
     pub span: Span,
+    /// The attached `/** ... */` doc comment, if any — for methods, properties,
+    /// constants, and enum cases alike.
+    pub doc: Option<Span>,
     pub attrs: Vec<AttributeGroup>,
     pub modifiers: Vec<Modifier>,
     pub kind: MemberKind,

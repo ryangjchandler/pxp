@@ -18,7 +18,7 @@
 //!   surface `$a` to downstream passes — this is what lets capture analysis see
 //!   variables used inside strings.
 //!
-//! Known simplifications (documented, refined later): inside a simple
+//! Known simplifications: inside a simple
 //! interpolation, `$a[0]` / `$a->b` offsets and property names are folded into
 //! the surrounding encapsed text rather than split into `T_NUM_STRING` /
 //! `T_STRING` tokens (variables inside, like `"$a[$i]"`, are still surfaced);

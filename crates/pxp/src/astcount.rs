@@ -258,7 +258,7 @@ fn expr(e: &Expr, c: &mut Counts) {
             expr(e2, c);
             expr(class, c);
         }
-        ExprKind::Call { callee, args } | ExprKind::New { class: callee, args } => {
+        ExprKind::Call { callee, args } | ExprKind::New { class: callee, args, .. } => {
             expr(callee, c);
             for a in args {
                 expr(&a.value, c);

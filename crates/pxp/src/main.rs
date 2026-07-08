@@ -430,8 +430,8 @@ fn cmd_parse_debug(args: &[String]) -> i32 {
 }
 
 /// Parse every `.php` file under a directory and report grammar coverage:
-/// panics, parse errors, and `Unknown` recovery nodes. A corpus-driven metric
-/// for completing the parser.
+/// panics, parse errors, and `Unknown` recovery nodes. A corpus-driven coverage
+/// metric for the parser.
 fn cmd_parse_check(args: &[String]) -> i32 {
     let Some(dir) = args.first() else {
         eprintln!("error: `parse-check` needs a directory");

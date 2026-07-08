@@ -153,7 +153,8 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Retired limitations — fixed by the Phase D scope resolver.
+    // Capture cases requiring scope analysis: nested-closure params, destructuring
+    // targets, and transitive capture through nested functions.
     // ---------------------------------------------------------------------
 
     #[test]

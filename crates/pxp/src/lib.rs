@@ -1,6 +1,6 @@
 //! pxp — a fast PHP superset transpiler.
 //!
-//! Architecture (pilot):
+//! Architecture:
 //!   source ──lex──▶ tokens+spans ──transform passes──▶ edits ──splice──▶ PHP
 //!
 //! The guiding principles:

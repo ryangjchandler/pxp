@@ -1,0 +1,38 @@
+<?php
+
+// A class with a single type parameter. Erases to `/** @template T */ class Box`
+// with the parameter positions annotated and the native `T` hints stripped.
+class Box<T> {
+    private T $value;
+
+    public function __construct(T $value) {
+        $this->value = $value;
+    }
+
+    public function get(): T {
+        return $this->value;
+    }
+}
+
+// Multiple type parameters. Two tags can't share a line, so the docblock becomes a
+// normal multi-line PHPDoc block (source maps translate the shifted lines back).
+class Pair<K, V> {
+    public function __construct(
+        public K $key,
+        public V $value,
+    ) {}
+}
+
+class User {
+    public function __construct(public string $name) {}
+}
+
+// A generic application in a plain type hint — works outside any generic class.
+// `Box<User>` keeps `Box` natively and records the full type in `@param`.
+function unwrap(Box<User> $box): User {
+    return $box->get();
+}
+
+// Turbofish construction. `::<User>` is erased; the type only informs analysers.
+$box = new Box::<User>(new User("Ada"));
+echo unwrap($box)->name, "\n";

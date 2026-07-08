@@ -1,8 +1,7 @@
 /// Maps byte offsets to 1-based line/column and back.
 ///
-/// Built once per file (source and generated). This is the one genuinely new
-/// primitive the source-map story needs; the parser's spans plus this utility
-/// are enough to translate positions in either direction.
+/// Built once per file (source and generated), it translates positions in either
+/// direction to complement the parser's byte spans.
 pub struct LineIndex {
     /// Byte offset of the first character of each line. `line_starts[0] == 0`.
     line_starts: Vec<usize>,

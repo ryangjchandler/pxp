@@ -53,6 +53,9 @@ struct Parser<'a> {
     src: &'a [u8],
     toks: Vec<Token>,
     pos: usize,
+    /// Maps a token index in `toks` to the `/** ... */` doc comment attached to the
+    /// declaration starting there (see [`Parser::new`]).
+    docs: std::collections::HashMap<usize, Span>,
     errors: Vec<ParseError>,
     /// Count of `Unknown` recovery nodes produced — a grammar-coverage metric.
     unknowns: usize,
@@ -60,14 +63,41 @@ struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn new(src: &'a [u8]) -> Self {
-        let toks = lex(src).into_iter().filter(|t| !t.kind.is_trivia()).collect();
+        // Structural parsing walks only non-trivia tokens, but doc comments must
+        // survive: as trivia is filtered, remember the last `/** */` seen and pin it
+        // to the next real token — the declaration it documents. Whitespace keeps a
+        // pending doc alive; a regular comment or a newer doc comment replaces it, so
+        // only the doc immediately preceding a declaration attaches (matching PHP).
+        let mut toks = Vec::new();
+        let mut docs = std::collections::HashMap::new();
+        let mut pending: Option<Span> = None;
+        for t in lex(src) {
+            match t.kind {
+                TokenKind::Whitespace => {}
+                TokenKind::DocComment => pending = Some(t.span),
+                TokenKind::Comment => pending = None,
+                _ => {
+                    if let Some(doc) = pending.take() {
+                        docs.insert(toks.len(), doc);
+                    }
+                    toks.push(t);
+                }
+            }
+        }
         Parser {
             src,
             toks,
             pos: 0,
+            docs,
             errors: Vec::new(),
             unknowns: 0,
         }
+    }
+
+    /// The doc comment attached to the declaration beginning at the current token,
+    /// if any. Captured before attributes/modifiers are consumed.
+    fn doc_here(&self) -> Option<Span> {
+        self.docs.get(&self.pos).copied()
     }
 }
 
@@ -201,6 +231,7 @@ impl<'a> Parser<'a> {
 
     fn parse_stmt(&mut self) -> Stmt {
         let lo = self.lo();
+        let doc = self.doc_here();
         let attrs = self.parse_attributes();
         let kind = match self.kind() {
             TokenKind::OpenTag | TokenKind::OpenTagEcho => {
@@ -341,7 +372,9 @@ impl<'a> Parser<'a> {
                     && !(self.kind_at(1) == TokenKind::Amp
                         && self.kind_at(2) == TokenKind::LeftParen) =>
             {
-                StmtKind::Function(self.parse_function(attrs))
+                let mut f = self.parse_function(attrs);
+                f.doc = doc;
+                StmtKind::Function(f)
             }
             TokenKind::Keyword(
                 Keyword::Class
@@ -351,7 +384,11 @@ impl<'a> Parser<'a> {
                 | Keyword::Abstract
                 | Keyword::Final
                 | Keyword::Readonly,
-            ) => StmtKind::ClassLike(self.parse_classlike(attrs)),
+            ) => {
+                let mut cl = self.parse_classlike(attrs);
+                cl.doc = doc;
+                StmtKind::ClassLike(cl)
+            }
             // A goto label: `identifier :` (but not `::`).
             TokenKind::Identifier if self.kind_at(1) == TokenKind::Colon => {
                 let s = self.cur().span;
@@ -497,9 +534,8 @@ impl<'a> Parser<'a> {
     }
 
     /// Consume a construct we can't model, balancing brackets so a trailing `}`
-    /// block or `;` ends it, with the span preserved for lossless emit. The full
-    /// grammar now parses all of PHP 8.4, so this is unused — retained as an
-    /// error-recovery fallback for Phase E.
+    /// block or `;` ends it, with the span preserved for lossless emit. Currently
+    /// unused — kept as an error-recovery fallback.
     #[allow(dead_code)]
     fn parse_unknown_stmt(&mut self) -> Stmt {
         let lo = self.lo();
@@ -1189,10 +1225,13 @@ impl<'a> Parser<'a> {
             let members = self.parse_class_body();
             let class = ClassLike {
                 span: self.span_from(clo),
+                doc: None,
                 attrs: Vec::new(),
                 modifiers,
                 kind: ClassKind::Class,
                 name: None,
+                type_params: Vec::new(),
+                type_params_span: None,
                 enum_backing: None,
                 extends,
                 implements,
@@ -1203,7 +1242,7 @@ impl<'a> Parser<'a> {
                 kind: ExprKind::NewAnon { args, class: Box::new(class) },
             };
         }
-        let class = self.parse_new_target();
+        let (class, type_args) = self.parse_new_target();
         let args = if self.at(TokenKind::LeftParen) {
             self.parse_args()
         } else {
@@ -1214,6 +1253,7 @@ impl<'a> Parser<'a> {
             kind: ExprKind::New {
                 class: Box::new(class),
                 args,
+                type_args,
             },
         }
     }
@@ -1221,7 +1261,7 @@ impl<'a> Parser<'a> {
     /// The class reference after `new`: a name, variable, or parenthesized expr,
     /// plus member/index chains — but *not* the trailing call parens (those are
     /// constructor arguments).
-    fn parse_new_target(&mut self) -> Expr {
+    fn parse_new_target(&mut self) -> (Expr, Option<TypeArgs>) {
         let mut e = match self.kind() {
             TokenKind::Variable => {
                 let s = self.cur().span;
@@ -1247,15 +1287,25 @@ impl<'a> Parser<'a> {
             }
             _ => self.parse_name(),
         };
+        let mut type_args = None;
         loop {
             match self.kind() {
+                // pxp generics turbofish `new Box::<User>()` — must be checked before
+                // the static-member branch so `::<` isn't read as `:: <name>`.
+                TokenKind::DoubleColon if self.kind_at(1) == TokenKind::Lt => {
+                    let ta_lo = self.lo();
+                    self.bump(); // `::`
+                    let args = self.parse_type_args();
+                    type_args = Some(TypeArgs { span: self.span_from(ta_lo), args });
+                    break;
+                }
                 TokenKind::Arrow | TokenKind::NullsafeArrow => e = self.parse_member(e),
                 TokenKind::DoubleColon => e = self.parse_static_member(e),
                 TokenKind::LeftBracket => e = self.parse_index(e),
                 _ => break,
             }
         }
-        e
+        (e, type_args)
     }
 
     fn parse_match(&mut self) -> Expr {
@@ -1538,7 +1588,35 @@ impl<'a> Parser<'a> {
             }
             _ => self.parse_name_string(),
         };
-        Type { span: self.span_from(lo), kind: TypeKind::Named(name) }
+        let name_span = self.span_from(lo);
+        // pxp generics: `Foo<A, B>` in type position. A `<` following a type name is
+        // never valid PHP, so there's no ambiguity with the comparison operator here.
+        if self.at(TokenKind::Lt) {
+            let args_lo = self.lo();
+            let args = self.parse_type_args();
+            let args_span = self.span_from(args_lo);
+            return Type {
+                span: self.span_from(lo),
+                kind: TypeKind::Generic { name, name_span, args, args_span },
+            };
+        }
+        Type { span: name_span, kind: TypeKind::Named(name) }
+    }
+
+    /// Parse a `<A, B>` type-argument list, positioned at the opening `<`. Returns
+    /// the parsed types; the caller records the span. Only single-level applications
+    /// are supported; nested applications closing with `>>` are not handled.
+    fn parse_type_args(&mut self) -> Vec<Type> {
+        self.expect(TokenKind::Lt, "`<`");
+        let mut args = Vec::new();
+        if !self.at(TokenKind::Gt) {
+            args.push(self.parse_type());
+            while self.eat(TokenKind::Comma) && !self.at(TokenKind::Gt) {
+                args.push(self.parse_type());
+            }
+        }
+        self.expect(TokenKind::Gt, "`>`");
+        args
     }
 
     /// A `&` beginning an intersection type (followed by a type name), as opposed
@@ -1662,7 +1740,7 @@ impl<'a> Parser<'a> {
             self.eat(TokenKind::Semicolon);
             None
         };
-        FunctionDecl { span: self.span_from(lo), attrs, by_ref, name, params, return_type, body }
+        FunctionDecl { span: self.span_from(lo), doc: None, attrs, by_ref, name, params, return_type, body }
     }
 
     fn parse_class_heritage(&mut self) -> (Vec<ByteString>, Vec<ByteString>) {
@@ -1694,6 +1772,15 @@ impl<'a> Parser<'a> {
         };
         self.bump(); // class / interface / trait / enum
         let name = Some(self.parse_member_ident());
+        // pxp generics: `class Box<T>`. Unambiguous — a name in declaration position
+        // is only ever followed by `<` here.
+        let (type_params, type_params_span) = if self.at(TokenKind::Lt) {
+            let tp_lo = self.lo();
+            let params = self.parse_type_params();
+            (params, Some(self.span_from(tp_lo)))
+        } else {
+            (Vec::new(), None)
+        };
         let enum_backing = if kind == ClassKind::Enum && self.eat(TokenKind::Colon) {
             Some(self.parse_type())
         } else {
@@ -1703,15 +1790,34 @@ impl<'a> Parser<'a> {
         let members = self.parse_class_body();
         ClassLike {
             span: self.span_from(lo),
+            doc: None,
             attrs,
             modifiers,
             kind,
             name,
+            type_params,
+            type_params_span,
             enum_backing,
             extends,
             implements,
             members,
         }
+    }
+
+    /// Parse a `<T, U>` type-parameter declaration, positioned at the opening `<`.
+    fn parse_type_params(&mut self) -> Vec<TypeParam> {
+        self.expect(TokenKind::Lt, "`<`");
+        let mut params = Vec::new();
+        while !self.at(TokenKind::Gt) && !self.at(TokenKind::Eof) {
+            let p_lo = self.lo();
+            let name = self.parse_member_ident();
+            params.push(TypeParam { span: self.span_from(p_lo), name });
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(TokenKind::Gt, "`>`");
+        params
     }
 
     fn parse_class_body(&mut self) -> Vec<Member> {
@@ -1729,6 +1835,14 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_class_member(&mut self) -> Member {
+        // Capture the attached doc before attributes/modifiers advance the cursor.
+        let doc = self.doc_here();
+        let mut m = self.parse_class_member_inner();
+        m.doc = doc;
+        m
+    }
+
+    fn parse_class_member_inner(&mut self) -> Member {
         let lo = self.lo();
         let attrs = self.parse_attributes();
 
@@ -1748,6 +1862,7 @@ impl<'a> Parser<'a> {
             }
             return Member {
                 span: self.span_from(lo),
+                doc: None,
                 attrs,
                 modifiers: Vec::new(),
                 kind: MemberKind::UseTrait { traits, adaptations },
@@ -1761,6 +1876,7 @@ impl<'a> Parser<'a> {
             self.expect_semi();
             return Member {
                 span: self.span_from(lo),
+                doc: None,
                 attrs,
                 modifiers: Vec::new(),
                 kind: MemberKind::EnumCase { name, value },
@@ -1793,6 +1909,7 @@ impl<'a> Parser<'a> {
             self.expect_semi();
             return Member {
                 span: self.span_from(lo),
+                doc: None,
                 attrs,
                 modifiers,
                 kind: MemberKind::Const { ty, consts },
@@ -1803,6 +1920,7 @@ impl<'a> Parser<'a> {
             let f = self.parse_function(Vec::new());
             return Member {
                 span: self.span_from(lo),
+                doc: None,
                 attrs,
                 modifiers,
                 kind: MemberKind::Method(f),
@@ -1830,6 +1948,7 @@ impl<'a> Parser<'a> {
         self.eat(TokenKind::Semicolon);
         Member {
             span: self.span_from(lo),
+            doc: None,
             attrs,
             modifiers,
             kind: MemberKind::Property { ty, props, hooks },
@@ -2238,7 +2357,7 @@ mod tests {
                 sexpr(src, base),
                 index.as_ref().map(|i| sexpr(src, i)).unwrap_or_else(|| "_".into())
             ),
-            New { class, args } => {
+            New { class, args, .. } => {
                 let a: Vec<_> = args.iter().map(|x| sexpr(src, &x.value)).collect();
                 format!("(new {} [{}])", sexpr(src, class), a.join(" "))
             }

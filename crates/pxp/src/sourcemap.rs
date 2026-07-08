@@ -2,14 +2,14 @@
 //!
 //! The primary consumer is our own tooling (exception/stack-trace translation),
 //! and PHP stack traces are line-granular, so the serialized map is line-based.
-//! We deliberately do *not* use Source Map v3 / VLQ for v1 — it's column-oriented
-//! and built for JS, and we're our own consumer. The on-disk form is a compact
+//! We deliberately do *not* use Source Map v3 / VLQ: it's column-oriented and
+//! built for JS, and we're our own consumer. The on-disk form is a compact
 //! list of `(generated_line -> source_line)` anchors; lines between anchors
 //! advance 1:1. A line-preserving transpile collapses to a single `(1, 1)` anchor
 //! (the identity map), which also lets tests *assert* line-preservation.
 //!
 //! The internal derivation works from [`Segment`]s in byte coordinates, so it
-//! stays general enough to emit a richer (column-level, v3) format later.
+//! stays general enough to support a richer column-level format if needed.
 
 use crate::emit::{Segment, SegmentKind};
 use crate::line_index::LineIndex;

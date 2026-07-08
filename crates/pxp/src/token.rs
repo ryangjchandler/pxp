@@ -139,7 +139,7 @@ pub enum TokenKind {
     DoubleQuote,     // `"` delimiter (open or close) of an interpolated string
     Backtick,        // `` ` `` delimiter of a shell-exec string
     EncapsedText,    // T_ENCAPSED_AND_WHITESPACE — a literal chunk inside a string
-    NumString,       // T_NUM_STRING — an integer offset inside `"$a[0]"`
+    NumString,       // T_NUM_STRING — reserved; in-string integer offsets fold into EncapsedText
     StartHeredoc,    // `<<<LABEL\n` or `<<<'LABEL'\n`
     EndHeredoc,      // closing `LABEL` (with any leading indentation)
     CurlyOpen,       // `{` of a `{$...}` complex interpolation

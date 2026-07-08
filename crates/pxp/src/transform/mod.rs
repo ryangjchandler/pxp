@@ -10,7 +10,7 @@ pub mod short_closures;
 use crate::emit::Edit;
 
 /// Run every feature pass and collect their edits.
-pub fn run_all(src: &str) -> Vec<Edit> {
+pub fn run_all(src: &[u8]) -> Vec<Edit> {
     let mut edits = Vec::new();
     edits.extend(short_closures::transform(src));
     edits

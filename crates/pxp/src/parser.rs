@@ -7,6 +7,7 @@
 //! covering the raw tokens, so the parser is total and never loses bytes.
 
 use crate::ast::*;
+use crate::bytestr::{ByteStr, ByteString};
 use crate::lexer::lex;
 use crate::span::Span;
 use crate::token::{Keyword, Token, TokenKind};
@@ -17,15 +18,15 @@ pub struct ParseError {
     pub message: String,
 }
 
-pub fn parse(src: &str) -> (Program, Vec<ParseError>) {
+pub fn parse(src: impl AsRef<[u8]>) -> (Program, Vec<ParseError>) {
     let (program, errors, _) = parse_stats(src);
     (program, errors)
 }
 
 /// Like [`parse`], but also returns the number of `Unknown` recovery nodes — a
 /// coverage metric for driving grammar completeness against a corpus.
-pub fn parse_stats(src: &str) -> (Program, Vec<ParseError>, usize) {
-    let mut p = Parser::new(src);
+pub fn parse_stats(src: impl AsRef<[u8]>) -> (Program, Vec<ParseError>, usize) {
+    let mut p = Parser::new(src.as_ref());
     let mut stmts = Vec::new();
     while !p.at(TokenKind::Eof) {
         let before = p.pos;
@@ -39,17 +40,17 @@ pub fn parse_stats(src: &str) -> (Program, Vec<ParseError>, usize) {
 
 /// Parse a single expression from `src` (wrapped in `<?php`). Test/tooling entry.
 pub fn parse_expr_str(src: &str) -> (Expr, Vec<ParseError>) {
-    // `Expr`/`ParseError` own their data (Spans are plain offsets; names are
-    // copied to `String`), so nothing outlives the local buffer — no leak needed.
+    // The AST owns its data (Spans are plain offsets; names are copied into
+    // `ByteString`), so nothing outlives the local buffer.
     let full = format!("<?php {src}");
-    let mut p = Parser::new(&full);
+    let mut p = Parser::new(full.as_bytes());
     p.eat(TokenKind::OpenTag);
     let e = p.parse_expr(0);
     (e, p.errors)
 }
 
 struct Parser<'a> {
-    src: &'a str,
+    src: &'a [u8],
     toks: Vec<Token>,
     pos: usize,
     errors: Vec<ParseError>,
@@ -58,7 +59,7 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(src: &'a str) -> Self {
+    fn new(src: &'a [u8]) -> Self {
         let toks = lex(src).into_iter().filter(|t| !t.kind.is_trivia()).collect();
         Parser {
             src,
@@ -192,8 +193,8 @@ impl<'a> Parser<'a> {
         Span::new(lo, self.prev_hi().max(lo))
     }
 
-    fn text(&self, span: Span) -> &str {
-        span.as_str(self.src)
+    fn text(&self, span: Span) -> ByteStr<'a> {
+        span.slice(self.src)
     }
 
     // --- statements -------------------------------------------------------
@@ -277,7 +278,7 @@ impl<'a> Parser<'a> {
                 while self.at(TokenKind::Variable) {
                     let s = self.cur().span;
                     self.bump();
-                    vars.push(self.text(s)[1..].to_string());
+                    vars.push(self.text(s).without_first().to_owned());
                     if !self.eat(TokenKind::Comma) {
                         break;
                     }
@@ -306,7 +307,7 @@ impl<'a> Parser<'a> {
                 while self.at(TokenKind::Variable) {
                     let s = self.cur().span;
                     self.bump();
-                    let name = self.text(s)[1..].to_string();
+                    let name = self.text(s).without_first().to_owned();
                     let def = if self.eat(TokenKind::Assign) { Some(self.parse_expr(0)) } else { None };
                     vars.push((name, def));
                     if !self.eat(TokenKind::Comma) {
@@ -356,7 +357,7 @@ impl<'a> Parser<'a> {
                 let s = self.cur().span;
                 self.bump();
                 self.bump(); // :
-                StmtKind::Label(self.text(s).to_string())
+                StmtKind::Label(self.text(s).to_owned())
             }
             _ => {
                 let expr = self.parse_expr(0);
@@ -790,7 +791,7 @@ impl<'a> Parser<'a> {
             TokenKind::Keyword(Keyword::Static) => {
                 let s = self.cur().span;
                 self.bump();
-                ExprKind::Name(self.text(s).to_string())
+                ExprKind::Name(self.text(s).to_owned())
             }
             TokenKind::Keyword(Keyword::Match) => return self.parse_match(),
             TokenKind::Keyword(Keyword::Include) => self.parse_include(IncludeKind::Include),
@@ -844,7 +845,7 @@ impl<'a> Parser<'a> {
             TokenKind::Variable => {
                 let s = self.cur().span;
                 self.bump();
-                ExprKind::Variable(self.text(s)[1..].to_string())
+                ExprKind::Variable(self.text(s).without_first().to_owned())
             }
             TokenKind::Int => {
                 self.bump();
@@ -867,7 +868,7 @@ impl<'a> Parser<'a> {
             TokenKind::MagicConstant => {
                 let s = self.cur().span;
                 self.bump();
-                ExprKind::Name(self.text(s).to_string())
+                ExprKind::Name(self.text(s).to_owned())
             }
             // Any remaining keyword in expression position is a semi-reserved name
             // used as a constant / class reference (`Enum::cases()`, `Namespace\X`).
@@ -923,7 +924,7 @@ impl<'a> Parser<'a> {
         let span = self.span_from(lo);
         Expr {
             span,
-            kind: ExprKind::Name(self.text(span).to_string()),
+            kind: ExprKind::Name(self.text(span).to_owned()),
         }
     }
 
@@ -952,7 +953,7 @@ impl<'a> Parser<'a> {
                     self.bump();
                     parts.push(StringPart::Expr(Expr {
                         span: s,
-                        kind: ExprKind::Variable(self.text(s)[1..].to_string()),
+                        kind: ExprKind::Variable(self.text(s).without_first().to_owned()),
                     }));
                 }
                 TokenKind::CurlyOpen => {
@@ -968,7 +969,7 @@ impl<'a> Parser<'a> {
                         self.bump();
                         parts.push(StringPart::Expr(Expr {
                             span: s,
-                            kind: ExprKind::Variable(self.text(s).to_string()),
+                            kind: ExprKind::Variable(self.text(s).to_owned()),
                         }));
                     } else {
                         let e = self.parse_expr(0);
@@ -1062,7 +1063,7 @@ impl<'a> Parser<'a> {
             TokenKind::Variable => {
                 let s = self.cur().span;
                 self.bump();
-                MemberName::Variable(self.text(s)[1..].to_string())
+                MemberName::Variable(self.text(s).without_first().to_owned())
             }
             TokenKind::LeftBrace => {
                 self.bump();
@@ -1076,13 +1077,13 @@ impl<'a> Parser<'a> {
                 // `Foo::class`
                 let s = self.cur().span;
                 self.bump();
-                MemberName::Identifier(self.text(s).to_string())
+                MemberName::Identifier(self.text(s).to_owned())
             }
             _ => {
                 let s = self.cur().span;
                 // Any identifier/keyword acts as a member name here.
                 self.bump();
-                MemberName::Identifier(self.text(s).to_string())
+                MemberName::Identifier(self.text(s).to_owned())
             }
         }
     }
@@ -1100,7 +1101,7 @@ impl<'a> Parser<'a> {
                 let s = self.cur().span;
                 self.bump(); // name
                 self.bump(); // :
-                Some(self.text(s).to_string())
+                Some(self.text(s).to_owned())
             } else {
                 None
             };
@@ -1227,7 +1228,7 @@ impl<'a> Parser<'a> {
                 self.bump();
                 Expr {
                     span: s,
-                    kind: ExprKind::Variable(self.text(s)[1..].to_string()),
+                    kind: ExprKind::Variable(self.text(s).without_first().to_owned()),
                 }
             }
             TokenKind::LeftParen => {
@@ -1241,7 +1242,7 @@ impl<'a> Parser<'a> {
                 self.bump();
                 Expr {
                     span: s,
-                    kind: ExprKind::Name(self.text(s).to_string()),
+                    kind: ExprKind::Name(self.text(s).to_owned()),
                 }
             }
             _ => self.parse_name(),
@@ -1311,7 +1312,7 @@ impl<'a> Parser<'a> {
                 if self.at(TokenKind::Variable) {
                     let s = self.cur().span;
                     self.bump();
-                    uses.push((self.text(s)[1..].to_string(), by_ref));
+                    uses.push((self.text(s).without_first().to_owned(), by_ref));
                 }
                 if !self.eat(TokenKind::Comma) {
                     break;
@@ -1387,9 +1388,9 @@ impl<'a> Parser<'a> {
             let name = if self.at(TokenKind::Variable) {
                 let s = self.cur().span;
                 self.bump();
-                self.text(s)[1..].to_string()
+                self.text(s).without_first().to_owned()
             } else {
-                String::new()
+                ByteString::new()
             };
             let default = if self.eat(TokenKind::Assign) {
                 Some(self.parse_expr(0))
@@ -1525,15 +1526,15 @@ impl<'a> Parser<'a> {
         let name = match self.kind() {
             TokenKind::Keyword(Keyword::Array) => {
                 self.bump();
-                "array".to_string()
+                ByteString::from("array")
             }
             TokenKind::Keyword(Keyword::Callable) => {
                 self.bump();
-                "callable".to_string()
+                ByteString::from("callable")
             }
             TokenKind::Keyword(Keyword::Static) => {
                 self.bump();
-                "static".to_string()
+                ByteString::from("static")
             }
             _ => self.parse_name_string(),
         };
@@ -1559,7 +1560,7 @@ impl<'a> Parser<'a> {
     /// Consume a (possibly qualified) name and return its raw text. Name segments
     /// may be keywords (`Foo\Array\List` is a valid name — keywords are only
     /// semi-reserved).
-    fn parse_name_string(&mut self) -> String {
+    fn parse_name_string(&mut self) -> ByteString {
         let lo = self.lo();
         self.eat(TokenKind::Backslash);
         self.eat_name_segment();
@@ -1568,7 +1569,7 @@ impl<'a> Parser<'a> {
             self.eat_name_segment();
         }
         let span = self.span_from(lo);
-        self.text(span).to_string()
+        self.text(span).to_owned()
     }
 
     fn eat_name_segment(&mut self) {
@@ -1582,10 +1583,10 @@ impl<'a> Parser<'a> {
     }
 
     /// A single identifier/keyword used as a name (member, const, label, alias).
-    fn parse_member_ident(&mut self) -> String {
+    fn parse_member_ident(&mut self) -> ByteString {
         let s = self.cur().span;
         self.bump();
-        self.text(s).to_string()
+        self.text(s).to_owned()
     }
 
     fn parse_modifiers(&mut self) -> Vec<Modifier> {
@@ -1664,7 +1665,7 @@ impl<'a> Parser<'a> {
         FunctionDecl { span: self.span_from(lo), attrs, by_ref, name, params, return_type, body }
     }
 
-    fn parse_class_heritage(&mut self) -> (Vec<String>, Vec<String>) {
+    fn parse_class_heritage(&mut self) -> (Vec<ByteString>, Vec<ByteString>) {
         let mut extends = Vec::new();
         if self.eat(TokenKind::Keyword(Keyword::Extends)) {
             extends.push(self.parse_name_string());
@@ -1814,7 +1815,7 @@ impl<'a> Parser<'a> {
         while self.at(TokenKind::Variable) {
             let s = self.cur().span;
             self.bump();
-            let name = self.text(s)[1..].to_string();
+            let name = self.text(s).without_first().to_owned();
             let def = if self.eat(TokenKind::Assign) { Some(self.parse_expr(0)) } else { None };
             props.push((name, def));
             if !self.eat(TokenKind::Comma) {
@@ -2037,7 +2038,7 @@ impl<'a> Parser<'a> {
             let var = if self.at(TokenKind::Variable) {
                 let s = self.cur().span;
                 self.bump();
-                Some(self.text(s)[1..].to_string())
+                Some(self.text(s).without_first().to_owned())
             } else {
                 None
             };
@@ -2121,9 +2122,12 @@ impl<'a> Parser<'a> {
                     } else {
                         None
                     };
+                    // Byte concatenation of prefix + item (not Display — bytes).
+                    let mut full = path.clone();
+                    full.push_bytes(sub.as_bytes());
                     items.push(UseItem {
                         span: self.span_from(glo),
-                        path: format!("{path}{sub}"),
+                        path: full,
                         alias,
                         kind: subkind,
                     });
@@ -2182,7 +2186,7 @@ mod tests {
     /// and the expression.
     fn parse_e(src: &str) -> (String, Expr) {
         let full = format!("<?php {src}");
-        let mut p = super::Parser::new(&full);
+        let mut p = super::Parser::new(full.as_bytes());
         p.eat(TokenKind::OpenTag);
         let e = p.parse_expr(0);
         assert!(p.errors.is_empty(), "unexpected parse errors for {src:?}: {:?}", p.errors);
@@ -2192,11 +2196,11 @@ mod tests {
     /// Render an expression to an S-expression so precedence is easy to assert.
     fn sexpr(src: &str, e: &Expr) -> String {
         use ExprKind::*;
-        let lit = |sp: Span| sp.as_str(src).to_string();
+        let lit = |sp: Span| sp.slice(src.as_bytes()).to_str_lossy().into_owned();
         match &e.kind {
             Int | Float | String => lit(e.span),
             Variable(n) => format!("${n}"),
-            Name(n) => n.clone(),
+            Name(n) => n.to_str_lossy().into_owned(),
             Unary { op, operand } => format!("({} {})", unop(*op), sexpr(src, operand)),
             PostfixIncDec { op, operand } => format!("({} {})", unop(*op), sexpr(src, operand)),
             Binary { op, lhs, rhs } => {
@@ -2281,7 +2285,7 @@ mod tests {
 
     fn member(m: &MemberName) -> String {
         match m {
-            MemberName::Identifier(s) => s.clone(),
+            MemberName::Identifier(s) => s.to_str_lossy().into_owned(),
             MemberName::Variable(s) => format!("${s}"),
             MemberName::Expr(_) => "{expr}".into(),
         }
@@ -2462,9 +2466,9 @@ while ($i < 10) {
             _ => None,
         });
         let class = class.expect("class parsed");
-        assert_eq!(class.name.as_deref(), Some("C"));
-        assert_eq!(class.extends, vec!["B".to_string()]);
-        assert_eq!(class.implements, vec!["I".to_string()]);
+        assert!(class.name.as_ref().is_some_and(|n| *n == "C"));
+        assert!(class.extends.len() == 1 && class.extends[0] == "B");
+        assert!(class.implements.len() == 1 && class.implements[0] == "I");
         assert_eq!(class.members.len(), 2); // property + method
         // The class does not swallow the following statement.
         assert!(program.stmts.iter().any(|s| matches!(&s.kind, StmtKind::Expr(_))));

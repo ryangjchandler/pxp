@@ -15,9 +15,8 @@ impl Span {
         Span { start, end }
     }
 
-    /// The source text this span covers. Callers only ever slice on token
-    /// boundaries, which the lexer guarantees to be UTF-8 aligned.
-    pub fn as_str<'a>(&self, src: &'a str) -> &'a str {
-        &src[self.start..self.end]
+    /// The source bytes this span covers (PHP source isn't guaranteed UTF-8).
+    pub fn slice<'a>(&self, src: &'a [u8]) -> crate::bytestr::ByteStr<'a> {
+        crate::bytestr::ByteStr::new(&src[self.start..self.end])
     }
 }

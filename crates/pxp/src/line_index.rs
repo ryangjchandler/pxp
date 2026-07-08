@@ -9,9 +9,9 @@ pub struct LineIndex {
 }
 
 impl LineIndex {
-    pub fn new(src: &str) -> Self {
+    pub fn new(src: &[u8]) -> Self {
         let mut line_starts = vec![0];
-        for (i, b) in src.bytes().enumerate() {
+        for (i, &b) in src.iter().enumerate() {
             if b == b'\n' {
                 line_starts.push(i + 1);
             }
@@ -50,7 +50,7 @@ mod tests {
 
     #[test]
     fn lines_and_columns() {
-        let idx = LineIndex::new("<?php\nabc\n");
+        let idx = LineIndex::new(b"<?php\nabc\n");
         assert_eq!(idx.line_count(), 3); // "<?php", "abc", ""
         assert_eq!(idx.line_of(0), 1);
         assert_eq!(idx.line_of(6), 2); // 'a'

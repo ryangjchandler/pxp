@@ -1,6 +1,10 @@
+#[cfg(feature = "memprof")]
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "memprof")]
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
 
 use pxp::parser::parse_stats;
@@ -8,6 +12,40 @@ use pxp::sourcemap::SourceMap;
 use pxp::{transpile, transpile_with_map};
 
 const SOURCE_EXTS: &[&str] = &["php", "pxp"];
+
+// A counting allocator so `mem-stats` can report real allocation behavior.
+// Gated behind `memprof` so the production path uses the system allocator untaxed.
+#[cfg(feature = "memprof")]
+mod memprof {
+    use super::*;
+
+    pub static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+    pub static ALLOC_BYTES: AtomicUsize = AtomicUsize::new(0);
+    pub static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
+    pub static PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+    pub struct Counting;
+
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let p = System.alloc(layout);
+            if !p.is_null() {
+                ALLOCS.fetch_add(1, Relaxed);
+                ALLOC_BYTES.fetch_add(layout.size(), Relaxed);
+                let live = LIVE_BYTES.fetch_add(layout.size(), Relaxed) + layout.size();
+                PEAK_BYTES.fetch_max(live, Relaxed);
+            }
+            p
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            System.dealloc(ptr, layout);
+            LIVE_BYTES.fetch_sub(layout.size(), Relaxed);
+        }
+    }
+
+    #[global_allocator]
+    static GLOBAL: Counting = Counting;
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -19,6 +57,7 @@ fn main() {
         Some("parse-debug") => cmd_parse_debug(&args[2..]),
         Some("fuzz") => cmd_fuzz(&args[2..]),
         Some("diff-nikic") => cmd_diff_nikic(&args[2..]),
+        Some("mem-stats") => cmd_mem_stats(&args[2..]),
         _ => {
             usage();
             2
@@ -42,9 +81,11 @@ fn cmd_transpile(args: &[String]) -> i32 {
         eprintln!("error: `transpile` needs a file path");
         return 2;
     };
-    match std::fs::read_to_string(path) {
+    match std::fs::read(path) {
         Ok(src) => {
-            print!("{}", transpile(&src));
+            // Write raw bytes — the output may not be UTF-8.
+            use std::io::Write;
+            let _ = std::io::stdout().write_all(&transpile(&src));
             0
         }
         Err(e) => {
@@ -77,7 +118,7 @@ fn cmd_build(args: &[String]) -> i32 {
 
     for src_path in &sources {
         let rel = src_path.strip_prefix(src_dir).unwrap_or(src_path);
-        let src = match std::fs::read_to_string(src_path) {
+        let src = match std::fs::read(src_path) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("error: reading {}: {e}", src_path.display());
@@ -158,7 +199,7 @@ fn cmd_diff_nikic(args: &[String]) -> i32 {
     // Our counts, keyed by path.
     let mut ours: std::collections::HashMap<String, [u32; 11]> = std::collections::HashMap::new();
     for path in &files {
-        let Ok(src) = std::fs::read_to_string(path) else { continue };
+        let Ok(src) = std::fs::read(path) else { continue };
         let (program, _, _) = parse_stats(&src);
         ours.insert(path.display().to_string(), pxp::astcount::count(&program).as_row());
     }
@@ -225,6 +266,59 @@ fn cmd_diff_nikic(args: &[String]) -> i32 {
     }
 }
 
+/// Report allocation behavior for transpiling one file: allocation count, total
+/// bytes churned, and peak simultaneously-live bytes (the AST's real footprint).
+fn cmd_mem_stats(args: &[String]) -> i32 {
+    let Some(path) = args.first() else {
+        eprintln!("error: `mem-stats` needs a file");
+        return 2;
+    };
+    let src = match std::fs::read(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+
+    #[cfg(not(feature = "memprof"))]
+    {
+        let _ = &src;
+        eprintln!("mem-stats needs the counting allocator: rebuild with `--features memprof`");
+        return 2;
+    }
+    #[cfg(feature = "memprof")]
+    {
+        use memprof::*;
+        // Warm up (page in code paths), then measure a single clean transpile.
+        std::hint::black_box(transpile(&src));
+
+        let base_live = LIVE_BYTES.load(Relaxed);
+        PEAK_BYTES.store(base_live, Relaxed);
+        let (a0, b0) = (ALLOCS.load(Relaxed), ALLOC_BYTES.load(Relaxed));
+
+        let out = transpile(&src);
+
+        let allocs = ALLOCS.load(Relaxed) - a0;
+        let churned = ALLOC_BYTES.load(Relaxed) - b0;
+        let peak = PEAK_BYTES.load(Relaxed).saturating_sub(base_live);
+        std::hint::black_box(&out);
+
+        let kb = |n: usize| n as f64 / 1024.0;
+        let file = src.len();
+        println!(
+            "mem-stats {path}\n  file size:        {:.1} KiB\n  allocations:      {allocs}\n  bytes churned:    {:.1} KiB ({:.1}x file)\n  peak live (AST):  {:.1} KiB ({:.1}x file)\n  alloc per KiB src: {:.0}",
+            kb(file),
+            kb(churned),
+            churned as f64 / file as f64,
+            kb(peak),
+            peak as f64 / file as f64,
+            allocs as f64 / kb(file),
+        );
+        0
+    }
+}
+
 /// Robustness fuzzing: deterministically mutate corpus files and assert the full
 /// `transpile` pipeline never panics on any input. Mutations: truncation at token
 /// boundaries (EOF mid-construct), single-token deletion (broken token streams),
@@ -248,9 +342,9 @@ fn cmd_fuzz(args: &[String]) -> i32 {
     let (mut cases, mut panics) = (0usize, Vec::<String>::new());
     let started = Instant::now();
 
-    let check = |label: String, input: &str, cases: &mut usize, panics: &mut Vec<String>| {
+    let check = |label: String, input: &[u8], cases: &mut usize, panics: &mut Vec<String>| {
         *cases += 1;
-        let owned = input.to_string();
+        let owned = input.to_vec();
         if std::panic::catch_unwind(|| {
             pxp::transpile(&owned);
         })
@@ -261,41 +355,35 @@ fn cmd_fuzz(args: &[String]) -> i32 {
     };
 
     for path in &files {
-        let Ok(src) = std::fs::read_to_string(path) else { continue };
+        let Ok(src) = std::fs::read(path) else { continue };
         if src.is_empty() {
             continue;
         }
+        // The pipeline is byte-oriented, so mutations can hit any byte offset.
         let toks = pxp::lexer::lex(&src);
         let stride = (toks.len() / 64).max(1);
 
         // 1. Truncation at token boundaries.
         for t in toks.iter().step_by(stride) {
             let end = t.span.end.min(src.len());
-            if src.is_char_boundary(end) {
-                check(format!("truncate@{end} {}", path.display()), &src[..end], &mut cases, &mut panics);
-            }
+            check(format!("truncate@{end} {}", path.display()), &src[..end], &mut cases, &mut panics);
         }
         // 2. Single-token deletion.
         for t in toks.iter().step_by(stride) {
-            if t.span.end <= src.len() && src.is_char_boundary(t.span.start) {
-                let mut m = String::with_capacity(src.len());
-                m.push_str(&src[..t.span.start]);
-                m.push_str(&src[t.span.end..]);
+            if t.span.end <= src.len() {
+                let mut m = Vec::with_capacity(src.len());
+                m.extend_from_slice(&src[..t.span.start]);
+                m.extend_from_slice(&src[t.span.end..]);
                 check(format!("del-token@{} {}", t.span.start, path.display()), &m, &mut cases, &mut panics);
             }
         }
-        // 3. Deterministic ASCII byte substitution (LCG — reproducible, no RNG).
+        // 3. Deterministic byte substitution (LCG — reproducible, no RNG).
         let mut x = 0x9e3779b97f4a7c15u64 ^ src.len() as u64;
-        let bytes = src.as_bytes();
         for _ in 0..48 {
             x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
             let pos = (x >> 33) as usize % src.len();
-            if !bytes[pos].is_ascii() {
-                continue; // keep UTF-8 valid
-            }
-            let mut m = src.clone().into_bytes();
+            let mut m = src.clone();
             m[pos] = INTERESTING[(x as usize >> 3) % INTERESTING.len()];
-            let m = String::from_utf8(m).expect("ascii->ascii stays valid");
             check(format!("subst@{pos} {}", path.display()), &m, &mut cases, &mut panics);
         }
     }
@@ -323,7 +411,7 @@ fn cmd_parse_debug(args: &[String]) -> i32 {
         eprintln!("error: `parse-debug` needs a file");
         return 2;
     };
-    let src = match std::fs::read_to_string(path) {
+    let src = match std::fs::read(path) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: {e}");
@@ -334,8 +422,9 @@ fn cmd_parse_debug(args: &[String]) -> i32 {
     println!("{} errors, {unknowns} unknown nodes", errors.len());
     for e in errors.iter().take(20) {
         let text = &src[e.span.start..e.span.end.min(src.len())];
-        let line = src[..e.span.start].bytes().filter(|&b| b == b'\n').count() + 1;
-        println!("  L{line}: {} — at {:?}", e.message, text.chars().take(30).collect::<String>());
+        let line = src[..e.span.start].iter().filter(|&&b| b == b'\n').count() + 1;
+        let snippet: String = String::from_utf8_lossy(text).chars().take(30).collect();
+        println!("  L{line}: {} — at {snippet:?}", e.message);
     }
     0
 }
@@ -365,7 +454,7 @@ fn cmd_parse_check(args: &[String]) -> i32 {
     let started = Instant::now();
 
     for path in &files {
-        let Ok(src) = std::fs::read_to_string(path) else { continue };
+        let Ok(src) = std::fs::read(path) else { continue };
         match std::panic::catch_unwind(|| parse_stats(&src)) {
             Ok((_program, errors, unknowns)) => {
                 total_errors += errors.len();
@@ -454,7 +543,7 @@ fn collect_sources(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     Ok(())
 }
 
-fn hash_str(s: &str) -> u64 {
+fn hash_str(s: &[u8]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     s.hash(&mut hasher);
     hasher.finish()

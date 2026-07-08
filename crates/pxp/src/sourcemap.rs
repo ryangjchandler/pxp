@@ -27,8 +27,8 @@ impl SourceMap {
     pub fn from_segments(
         source_path: impl Into<String>,
         generated_path: impl Into<String>,
-        source: &str,
-        generated: &str,
+        source: &[u8],
+        generated: &[u8],
         segments: &[Segment],
     ) -> SourceMap {
         let src_idx = LineIndex::new(source);
@@ -142,19 +142,19 @@ mod tests {
     use crate::emit::{self, Edit};
 
     fn map_of(src: &str, edits: Vec<Edit>) -> SourceMap {
-        let (generated, segments) = emit::apply(src, edits);
-        SourceMap::from_segments("in.pxp", "out.php", src, &generated, &segments)
+        let (generated, segments) = emit::apply(src.as_bytes(), edits);
+        SourceMap::from_segments("in.pxp", "out.php", src.as_bytes(), &generated, &segments)
     }
 
     #[test]
     fn line_preserving_transpile_is_identity() {
         // The real short-closure feature is line-preserving, so its map must be
         // the identity — this is a machine-checkable form of that guarantee.
-        let src = "<?php\n$f = fn ($x) => {\n    return $x * $factor;\n};\n";
+        let src = b"<?php\n$f = fn ($x) => {\n    return $x * $factor;\n};\n";
         let (generated, segments) = emit::apply(src, crate::transform::run_all(src));
         let map = SourceMap::from_segments("in.pxp", "out.php", src, &generated, &segments);
         assert!(map.is_identity(), "map: {}", map.serialize());
-        assert!(generated.contains("use ($factor)"));
+        assert!(String::from_utf8_lossy(&generated).contains("use ($factor)"));
     }
 
     #[test]
@@ -171,7 +171,7 @@ mod tests {
         // Replace the single line "B" (source line 3) with three lines.
         let src = "<?php\nA\nB\nC\n";
         let b_start = src.find('B').unwrap();
-        let map = map_of(src, vec![Edit::replace(b_start, b_start + 1, "X\nY\nZ")]);
+        let map = map_of(src, vec![Edit::replace(b_start, b_start + 1, "X\nY\nZ".as_bytes())]);
 
         assert!(!map.is_identity());
         assert_eq!(map.source_line(1), 1); // <?php
@@ -188,7 +188,7 @@ mod tests {
     fn round_trips_through_serialization() {
         let src = "<?php\nA\nB\nC\n";
         let b_start = src.find('B').unwrap();
-        let map = map_of(src, vec![Edit::replace(b_start, b_start + 1, "X\nY\nZ")]);
+        let map = map_of(src, vec![Edit::replace(b_start, b_start + 1, "X\nY\nZ".as_bytes())]);
 
         let reparsed = SourceMap::parse(&map.serialize()).unwrap();
         assert_eq!(reparsed.source_path, "in.pxp");

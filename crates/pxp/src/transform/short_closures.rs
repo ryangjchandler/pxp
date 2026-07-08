@@ -30,25 +30,29 @@
 use crate::emit::Edit;
 use crate::scope;
 
-pub fn transform(src: &str) -> Vec<Edit> {
+pub fn transform(src: &[u8]) -> Vec<Edit> {
     let (program, _errors) = crate::parser::parse(src);
     let mut edits = Vec::new();
     for closure in scope::resolve(&program) {
         let bf = closure.node;
         // `fn` -> `function`
-        edits.push(Edit::replace(bf.fn_span.start, bf.fn_span.end, "function"));
+        edits.push(Edit::replace(bf.fn_span.start, bf.fn_span.end, b"function".to_vec()));
         // Drop the `=>` (surrounding whitespace stays, so the line is preserved).
-        edits.push(Edit::replace(bf.arrow_span.start, bf.arrow_span.end, ""));
+        edits.push(Edit::replace(bf.arrow_span.start, bf.arrow_span.end, Vec::new()));
         // Insert the synthesized `use (...)` right after the parameter list — which
-        // is the correct spot even when a return type follows.
+        // is the correct spot even when a return type follows. Built as raw bytes
+        // because a captured name may itself be non-UTF-8.
         if !closure.captures.is_empty() {
-            let list = closure
-                .captures
-                .iter()
-                .map(|n| format!("${n}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            edits.push(Edit::insert(bf.params_end, format!(" use ({list})")));
+            let mut repl = b" use (".to_vec();
+            for (i, name) in closure.captures.iter().enumerate() {
+                if i > 0 {
+                    repl.extend_from_slice(b", ");
+                }
+                repl.push(b'$');
+                repl.extend_from_slice(name.as_bytes());
+            }
+            repl.push(b')');
+            edits.push(Edit::insert(bf.params_end, repl));
         }
     }
     edits
@@ -57,11 +61,11 @@ pub fn transform(src: &str) -> Vec<Edit> {
 #[cfg(test)]
 mod tests {
     // Feature-level tests exercise the full pipeline (parse + resolve + emit) via
-    // `transpile`, so they assert the actual PHP a user would get.
-    use crate::transpile;
+    // `transpile_str`, so they assert the actual PHP a user would get.
+    use crate::transpile_str;
 
     fn t(src: &str) -> String {
-        transpile(src)
+        transpile_str(src)
     }
 
     #[test]

@@ -50,9 +50,9 @@ pub struct Lexer<'a> {
     expect_property: bool,
 }
 
-pub fn lex(source: &str) -> Vec<Token> {
+pub fn lex(source: &[u8]) -> Vec<Token> {
     let mut lexer = Lexer {
-        src: source.as_bytes(),
+        src: source,
         pos: 0,
         states: vec![State::Html],
         expect_property: false,
@@ -273,7 +273,7 @@ impl<'a> Lexer<'a> {
         while self.pos < self.src.len() && is_ident_cont(self.src[self.pos]) {
             self.pos += 1;
         }
-        let text = std::str::from_utf8(&self.src[start..self.pos]).unwrap_or("");
+        let text = &self.src[start..self.pos];
 
         if self.expect_property {
             return self.tok(TokenKind::Identifier, start);
@@ -731,19 +731,19 @@ fn is_ident_cont(b: u8) -> bool {
     b == b'_' || b.is_ascii_alphanumeric() || b >= 0x80
 }
 
-fn is_magic_constant(text: &str) -> bool {
+fn is_magic_constant(text: &[u8]) -> bool {
     let upper = text.to_ascii_uppercase();
     matches!(
-        upper.as_str(),
-        "__LINE__"
-            | "__FILE__"
-            | "__DIR__"
-            | "__FUNCTION__"
-            | "__CLASS__"
-            | "__TRAIT__"
-            | "__METHOD__"
-            | "__NAMESPACE__"
-            | "__PROPERTY__"
+        upper.as_slice(),
+        b"__LINE__"
+            | b"__FILE__"
+            | b"__DIR__"
+            | b"__FUNCTION__"
+            | b"__CLASS__"
+            | b"__TRAIT__"
+            | b"__METHOD__"
+            | b"__NAMESPACE__"
+            | b"__PROPERTY__"
     )
 }
 
@@ -770,21 +770,21 @@ mod tests {
     use std::process::{Command, Stdio};
 
     fn kinds(src: &str) -> Vec<TokenKind> {
-        lex(src).iter().map(|t| t.kind).filter(|k| *k != TokenKind::Eof).collect()
+        lex(src.as_bytes()).iter().map(|t| t.kind).filter(|k| *k != TokenKind::Eof).collect()
     }
 
     fn var_texts(src: &str) -> Vec<String> {
-        lex(src)
+        lex(src.as_bytes())
             .iter()
             .filter(|t| t.kind == TokenKind::Variable)
-            .map(|t| t.span.as_str(src).to_string())
+            .map(|t| t.span.slice(src.as_bytes()).to_str_lossy().into_owned())
             .collect()
     }
 
     /// The lossless invariant: token spans tile the whole file with no gaps or
     /// overlaps, so the source reconstructs byte-for-byte.
     fn assert_round_trip(src: &str) {
-        let toks = lex(src);
+        let toks = lex(src.as_bytes());
         let mut cursor = 0;
         for t in &toks {
             assert_eq!(t.span.start, cursor, "gap/overlap before {:?} in {src:?}", t.kind);
@@ -813,7 +813,7 @@ mod tests {
     #[test]
     fn open_tag_folds_one_whitespace() {
         // `<?php ` is 6 bytes (folds one space), matching token_get_all.
-        let toks = lex("<?php  \n$x;");
+        let toks = lex(b"<?php  \n$x;");
         assert_eq!(toks[0].kind, TokenKind::OpenTag);
         assert_eq!(toks[0].span.end, 6);
         assert_eq!(toks[1].kind, TokenKind::Whitespace); // " \n"
@@ -912,7 +912,7 @@ mod tests {
     }
 
     fn our_token_ends(src: &str) -> Vec<usize> {
-        lex(src)
+        lex(src.as_bytes())
             .iter()
             .filter(|t| t.kind != TokenKind::Eof)
             .map(|t| t.span.end)

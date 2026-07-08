@@ -1,0 +1,26 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App;
+
+final class Money
+{
+    public function __construct(public readonly int $amount) {}
+
+    /**
+     * Scales each item by this Money's amount. Uses a pxp multi-line short
+     * closure — `$factor` is auto-captured into the generated `use (...)`.
+     */
+    public function scale(array $items): array
+    {
+        $factor = $this->amount;
+
+        $scale = fn ($x) => {
+            $scaled = $x * $factor;
+            return $scaled;
+        };
+
+        return array_map($scale, $items);
+    }
+}

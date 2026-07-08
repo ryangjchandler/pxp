@@ -8,6 +8,7 @@
 //! [`ExprKind::Error`] with a span covering the raw tokens, so the parser is
 //! *total* (never panics, never loses bytes).
 
+use crate::bytestr::ByteString;
 use crate::span::Span;
 use crate::token::Cast;
 
@@ -69,21 +70,21 @@ pub enum StmtKind {
     },
     Break(Option<Expr>),
     Continue(Option<Expr>),
-    Goto(String),
-    Label(String),
-    Global(Vec<String>),
+    Goto(ByteString),
+    Label(ByteString),
+    Global(Vec<ByteString>),
     /// `static $a = 1, $b;`
-    StaticVars(Vec<(String, Option<Expr>)>),
+    StaticVars(Vec<(ByteString, Option<Expr>)>),
     Unset(Vec<Expr>),
     /// `const A = 1, B = 2;` (top-level / namespaced constant).
-    Const(Vec<(String, Expr)>),
+    Const(Vec<(ByteString, Expr)>),
     /// `declare(strict_types=1);` — directives kept as raw text, optional body.
     Declare {
         directives: Span,
         body: Option<Vec<Stmt>>,
     },
     Namespace {
-        name: Option<String>,
+        name: Option<ByteString>,
         body: Option<Vec<Stmt>>,
     },
     Use(UseDecl),
@@ -114,7 +115,7 @@ pub struct Catch {
     pub span: Span,
     /// One or more caught types (union `catch (A | B $e)`).
     pub types: Vec<Type>,
-    pub var: Option<String>,
+    pub var: Option<ByteString>,
     pub body: Vec<Stmt>,
 }
 
@@ -135,8 +136,8 @@ pub enum UseKind {
 #[derive(Clone, Debug)]
 pub struct UseItem {
     pub span: Span,
-    pub path: String,
-    pub alias: Option<String>,
+    pub path: ByteString,
+    pub alias: Option<ByteString>,
     /// Per-item kind for grouped `use A\{function b, const C}`.
     pub kind: Option<UseKind>,
 }
@@ -158,12 +159,12 @@ pub enum ExprKind {
     /// A double-quoted / heredoc string with interpolation.
     Interpolated(Vec<StringPart>),
     /// `$name` (the name excludes the `$`).
-    Variable(String),
+    Variable(ByteString),
     /// `$$name` / `${expr}` — a variable whose name is computed.
     VariableVariable(Box<Expr>),
     /// A bareword: constant, function name, or class name — including `true`,
     /// `false`, `null`, `self`, `parent`, and qualified names like `A\B`.
-    Name(String),
+    Name(ByteString),
 
     Array(Vec<ArrayItem>),
 
@@ -289,7 +290,7 @@ pub struct ArrayItem {
 #[derive(Clone, Debug)]
 pub struct Arg {
     pub span: Span,
-    pub name: Option<String>, // named argument `name: value`
+    pub name: Option<ByteString>, // named argument `name: value`
     pub value: Expr,
     pub spread: bool,
 }
@@ -298,9 +299,9 @@ pub struct Arg {
 #[derive(Clone, Debug)]
 pub enum MemberName {
     /// `->prop`, `::CONST`, `->method(...)`.
-    Identifier(String),
+    Identifier(ByteString),
     /// `->$prop`, `::$prop`.
-    Variable(String),
+    Variable(ByteString),
     /// `->{expr}`, `::{expr}`.
     Expr(Box<Expr>),
 }
@@ -314,7 +315,7 @@ pub struct Param {
     pub ty: Option<Type>,
     pub by_ref: bool,
     pub variadic: bool,
-    pub name: String,
+    pub name: ByteString,
     pub default: Option<Expr>,
     /// Property hooks on a promoted property (8.4).
     pub hooks: Vec<PropertyHook>,
@@ -327,7 +328,7 @@ pub struct Closure {
     pub by_ref: bool,
     pub params: Vec<Param>,
     /// `use (...)` captures: (name, by_ref).
-    pub uses: Vec<(String, bool)>,
+    pub uses: Vec<(ByteString, bool)>,
     pub body: Vec<Stmt>,
 }
 
@@ -407,7 +408,7 @@ pub struct Type {
 #[derive(Clone, Debug)]
 pub enum TypeKind {
     /// `int`, `Foo`, `\A\B`, `self`, `static`, `array`, `callable`, `null`, ...
-    Named(String),
+    Named(ByteString),
     /// `?T`
     Nullable(Box<Type>),
     /// `A|B` (each member may itself be an intersection for DNF types).
@@ -425,7 +426,7 @@ pub struct AttributeGroup {
 #[derive(Clone, Debug)]
 pub struct Attribute {
     pub span: Span,
-    pub name: String,
+    pub name: ByteString,
     pub args: Vec<Arg>,
 }
 
@@ -451,7 +452,7 @@ pub struct FunctionDecl {
     pub span: Span,
     pub attrs: Vec<AttributeGroup>,
     pub by_ref: bool,
-    pub name: String,
+    pub name: ByteString,
     pub params: Vec<Param>,
     pub return_type: Option<Type>,
     /// `None` for a forward declaration / interface method (no body).
@@ -473,11 +474,11 @@ pub struct ClassLike {
     pub modifiers: Vec<Modifier>,
     pub kind: ClassKind,
     /// `None` for an anonymous class.
-    pub name: Option<String>,
+    pub name: Option<ByteString>,
     /// Backing type for `enum E: string`.
     pub enum_backing: Option<Type>,
-    pub extends: Vec<String>,
-    pub implements: Vec<String>,
+    pub extends: Vec<ByteString>,
+    pub implements: Vec<ByteString>,
     pub members: Vec<Member>,
 }
 
@@ -494,22 +495,22 @@ pub enum MemberKind {
     Property {
         ty: Option<Type>,
         /// One or more `$name = default`.
-        props: Vec<(String, Option<Expr>)>,
+        props: Vec<(ByteString, Option<Expr>)>,
         hooks: Vec<PropertyHook>,
     },
     Const {
         ty: Option<Type>,
-        consts: Vec<(String, Expr)>,
+        consts: Vec<(ByteString, Expr)>,
     },
     Method(FunctionDecl),
     /// `case Name;` or `case Name = value;`
     EnumCase {
-        name: String,
+        name: ByteString,
         value: Option<Expr>,
     },
     /// `use A, B { ...adaptations... }`
     UseTrait {
-        traits: Vec<String>,
+        traits: Vec<ByteString>,
         adaptations: Vec<Span>,
     },
 }
@@ -520,7 +521,7 @@ pub struct PropertyHook {
     pub span: Span,
     pub by_ref: bool,
     /// `get` or `set`.
-    pub name: String,
+    pub name: ByteString,
     pub params: Vec<Param>,
     pub body: HookBody,
 }

@@ -19,12 +19,13 @@
 use std::collections::HashSet;
 
 use crate::ast::*;
+use crate::bytestr::ByteString;
 
 /// A block short closure paired with its resolved capture list (bare names,
 /// without the leading `$`, in first-read order).
 pub struct BlockClosure<'a> {
     pub node: &'a BlockArrowFn,
-    pub captures: Vec<String>,
+    pub captures: Vec<ByteString>,
 }
 
 /// Find every block-bodied short closure in the program and resolve its captures.
@@ -37,36 +38,37 @@ pub fn resolve(program: &Program) -> Vec<BlockClosure<'_>> {
     collected
 }
 
+// Names are compared as raw bytes (PHP identifiers aren't guaranteed UTF-8).
 #[derive(Default)]
 struct Scope {
-    bound: HashSet<String>,
-    captured: Vec<String>,
-    seen: HashSet<String>,
+    bound: HashSet<Vec<u8>>,
+    captured: Vec<ByteString>,
+    seen: HashSet<Vec<u8>>,
 }
 
 impl Scope {
     fn from_params(params: &[Param]) -> Self {
         let mut s = Scope::default();
         for p in params {
-            s.bind(&p.name);
+            s.bind(p.name.as_bytes());
         }
         s
     }
 
-    fn read(&mut self, name: &str) {
-        if name.is_empty() || name == "this" || is_superglobal(name) {
+    fn read(&mut self, name: &[u8]) {
+        if name.is_empty() || name == b"this" || is_superglobal(name) {
             return;
         }
         if self.bound.contains(name) || self.seen.contains(name) {
             return;
         }
-        self.captured.push(name.to_string());
-        self.seen.insert(name.to_string());
+        self.captured.push(ByteString::from(name));
+        self.seen.insert(name.to_vec());
     }
 
-    fn bind(&mut self, name: &str) {
+    fn bind(&mut self, name: &[u8]) {
         if !name.is_empty() {
-            self.bound.insert(name.to_string());
+            self.bound.insert(name.to_vec());
         }
     }
 
@@ -128,7 +130,7 @@ impl Scope {
                 self.visit_stmts(body, out);
                 for c in catches {
                     if let Some(v) = &c.var {
-                        self.bind(v);
+                        self.bind(v.as_bytes());
                     }
                     self.visit_stmts(&c.body, out);
                 }
@@ -143,7 +145,7 @@ impl Scope {
             }
             StmtKind::Global(names) => {
                 for n in names {
-                    self.bind(n);
+                    self.bind(n.as_bytes());
                 }
             }
             StmtKind::StaticVars(vars) => {
@@ -151,7 +153,7 @@ impl Scope {
                     if let Some(d) = def {
                         self.visit_expr(d, out);
                     }
-                    self.bind(n);
+                    self.bind(n.as_bytes());
                 }
             }
             StmtKind::Unset(items) => self.visit_all(items, out),
@@ -200,7 +202,7 @@ impl Scope {
 
     fn visit_expr<'a>(&mut self, expr: &'a Expr, out: &mut Vec<BlockClosure<'a>>) {
         match &expr.kind {
-            ExprKind::Variable(n) => self.read(n),
+            ExprKind::Variable(n) => self.read(n.as_bytes()),
             ExprKind::VariableVariable(inner) => self.visit_expr(inner, out),
             ExprKind::Int
             | ExprKind::Float
@@ -286,11 +288,11 @@ impl Scope {
                 // reads here. Its body is a separate scope; traverse it just to
                 // collect nested block closures.
                 for (name, _) in &c.uses {
-                    self.read(name);
+                    self.read(name.as_bytes());
                 }
                 let mut inner = Scope::from_params(&c.params);
                 for (name, _) in &c.uses {
-                    inner.bind(name);
+                    inner.bind(name.as_bytes());
                 }
                 inner.visit_stmts(&c.body, out);
             }
@@ -299,13 +301,13 @@ impl Scope {
                 // are reads in this scope.
                 let caps = analyze_expr(&f.params, &f.body, out);
                 for n in &caps {
-                    self.read(n);
+                    self.read(n.as_bytes());
                 }
             }
             ExprKind::BlockArrowFn(bf) => {
                 let caps = analyze_block(&bf.params, &bf.body, out);
                 for n in &caps {
-                    self.read(n);
+                    self.read(n.as_bytes());
                 }
                 out.push(BlockClosure { node: bf, captures: caps });
             }
@@ -347,7 +349,7 @@ impl Scope {
     /// elements; treat index/member/dynamic targets as reads of their base.
     fn bind_target<'a>(&mut self, target: &'a Expr, out: &mut Vec<BlockClosure<'a>>) {
         match &target.kind {
-            ExprKind::Variable(n) => self.bind(n),
+            ExprKind::Variable(n) => self.bind(n.as_bytes()),
             ExprKind::Array(items) | ExprKind::List(items) => {
                 for it in items {
                     if let Some(k) = &it.key {
@@ -375,7 +377,7 @@ fn analyze_block<'a>(
     params: &[Param],
     body: &'a [Stmt],
     out: &mut Vec<BlockClosure<'a>>,
-) -> Vec<String> {
+) -> Vec<ByteString> {
     let mut s = Scope::from_params(params);
     s.visit_stmts(body, out);
     s.captured
@@ -385,7 +387,7 @@ fn analyze_expr<'a>(
     params: &[Param],
     body: &'a Expr,
     out: &mut Vec<BlockClosure<'a>>,
-) -> Vec<String> {
+) -> Vec<ByteString> {
     let mut s = Scope::from_params(params);
     s.visit_expr(body, out);
     s.captured
@@ -432,17 +434,17 @@ fn visit_class<'a>(class: &'a ClassLike, out: &mut Vec<BlockClosure<'a>>) {
     }
 }
 
-fn is_superglobal(name: &str) -> bool {
+fn is_superglobal(name: &[u8]) -> bool {
     matches!(
         name,
-        "GLOBALS"
-            | "_SERVER"
-            | "_GET"
-            | "_POST"
-            | "_FILES"
-            | "_COOKIE"
-            | "_SESSION"
-            | "_REQUEST"
-            | "_ENV"
+        b"GLOBALS"
+            | b"_SERVER"
+            | b"_GET"
+            | b"_POST"
+            | b"_FILES"
+            | b"_COOKIE"
+            | b"_SESSION"
+            | b"_REQUEST"
+            | b"_ENV"
     )
 }

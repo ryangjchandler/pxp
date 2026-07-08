@@ -1,0 +1,29 @@
+{
+    "name": "pxp/pxp",
+    "description": "Use PXP (a PHP superset) in your app — transpile-on-load in dev, prebuilt for prod.",
+    "type": "composer-plugin",
+    "license": "MIT",
+    "require": {
+        "php": ">=8.1",
+        "composer-plugin-api": "^2.3"
+    },
+    "require-dev": {
+        "composer/composer": "^2.3"
+    },
+    "autoload": {
+        "psr-4": {
+            "Pxp\\": "src/"
+        },
+        "files": [
+            "src/bootstrap.php"
+        ]
+    },
+    "extra": {
+        "class": "Pxp\\Composer\\Plugin"
+    },
+    "config": {
+        "allow-plugins": {
+            "pxp/pxp": true
+        }
+    }
+}

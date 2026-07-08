@@ -6,11 +6,13 @@
 pub struct Edit {
     pub start: usize,
     pub end: usize,
-    pub replacement: String,
+    /// Raw replacement bytes (PHP source isn't guaranteed UTF-8, and a captured
+    /// name spliced into `use (...)` may itself contain non-UTF-8 bytes).
+    pub replacement: Vec<u8>,
 }
 
 impl Edit {
-    pub fn replace(start: usize, end: usize, replacement: impl Into<String>) -> Self {
+    pub fn replace(start: usize, end: usize, replacement: impl Into<Vec<u8>>) -> Self {
         Edit {
             start,
             end,
@@ -18,7 +20,7 @@ impl Edit {
         }
     }
 
-    pub fn insert(at: usize, text: impl Into<String>) -> Self {
+    pub fn insert(at: usize, text: impl Into<Vec<u8>>) -> Self {
         Edit {
             start: at,
             end: at,
@@ -60,15 +62,15 @@ pub struct Segment {
 ///
 /// Edits must not overlap. Ties at the same start are ordered insertions-first
 /// (end ascending) so an inserted `use (...)` lands before an adjacent replace.
-pub fn apply(src: &str, mut edits: Vec<Edit>) -> (String, Vec<Segment>) {
+pub fn apply(src: &[u8], mut edits: Vec<Edit>) -> (Vec<u8>, Vec<Segment>) {
     edits.sort_by_key(|e| (e.start, e.end));
 
-    let mut out = String::with_capacity(src.len() + 64);
+    let mut out = Vec::with_capacity(src.len() + 64);
     let mut segments = Vec::new();
     let mut cursor = 0; // position in source
     let mut out_pos = 0; // position in generated output
 
-    let push_verbatim = |out: &mut String, segments: &mut Vec<Segment>, out_pos: &mut usize, from: usize, to: usize| {
+    let push_verbatim = |out: &mut Vec<u8>, segments: &mut Vec<Segment>, out_pos: &mut usize, from: usize, to: usize| {
         if to > from {
             let len = to - from;
             segments.push(Segment {
@@ -78,7 +80,7 @@ pub fn apply(src: &str, mut edits: Vec<Edit>) -> (String, Vec<Segment>) {
                 src_end: to,
                 kind: SegmentKind::Verbatim,
             });
-            out.push_str(&src[from..to]);
+            out.extend_from_slice(&src[from..to]);
             *out_pos += len;
         }
     };
@@ -102,7 +104,7 @@ pub fn apply(src: &str, mut edits: Vec<Edit>) -> (String, Vec<Segment>) {
                 src_end: edit.end,
                 kind: SegmentKind::Synthesized,
             });
-            out.push_str(&edit.replacement);
+            out.extend_from_slice(&edit.replacement);
             out_pos += rlen;
         }
         cursor = edit.end;
